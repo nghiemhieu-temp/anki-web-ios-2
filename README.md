@@ -32,15 +32,8 @@
 ### Cách 1: Chạy Server nội bộ và mở trên iPhone qua Wi-Fi
 Trong cùng mạng Wi-Fi với iPhone:
 1. Mở PowerShell hoặc Terminal tại thư mục `anki-web-ios`:
-   ```bash
-   cd C:\Users\nghie\.gemini\antigravity\scratch\anki-web-ios
-   python -m http.server 8080 --bind 0.0.0.0
-   ```
-2. Tìm địa chỉ IP của máy tính (chạy lệnh `ipconfig` trên Windows, ví dụ `192.168.1.15`).
-3. Mở Safari trên iPhone và truy cập:
-   ```
-   http://192.168.1.15:8080
-   ```
+2. Tìm địa chỉ IP của máy tính (chạy lệnh `ipconfig` trên Windows).
+3. Mở Safari trên iPhone và truy cập
 
 ---
 
