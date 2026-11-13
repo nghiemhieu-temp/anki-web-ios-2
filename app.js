@@ -31,6 +31,16 @@ const state = {
     totalAnswers: 0,
     answered: false,
     currentQuestion: null
+  },
+  browser: {
+    active: false,
+    deck: null,
+    items: [],
+    filter: 'all',
+    searchQuery: '',
+    sortBy: 'original',
+    masking: false,
+    filteredItems: []
   }
 };
 
@@ -731,6 +741,7 @@ const DOM = {
   // Screens
   viewDecks: document.getElementById('view-decks'),
   viewStudy: document.getElementById('view-study'),
+  viewBrowser: document.getElementById('view-browser'),
   btnBack: document.getElementById('btn-back'),
   appTitle: document.getElementById('app-title'),
   btnToggleQuiz: document.getElementById('btn-toggle-quiz'),
@@ -812,6 +823,29 @@ const DOM = {
   quizGameoverModal: document.getElementById('quiz-gameover-modal'),
   btnQuizRefillHearts: document.getElementById('btn-quiz-refill-hearts'),
   btnQuizGameoverExit: document.getElementById('btn-quiz-gameover-exit'),
+
+  // Word List / Deck Browser Elements
+  browserDeckName: document.getElementById('browser-deck-name'),
+  browserCardCount: document.getElementById('browser-card-count'),
+  browserBarMastered: document.getElementById('browser-bar-mastered'),
+  browserBarLearning: document.getElementById('browser-bar-learning'),
+  browserBarNew: document.getElementById('browser-bar-new'),
+  browserStatNew: document.getElementById('browser-stat-new'),
+  browserStatLearning: document.getElementById('browser-stat-learning'),
+  browserStatMastered: document.getElementById('browser-stat-mastered'),
+  btnBrowserStudy: document.getElementById('btn-browser-study'),
+  btnBrowserQuiz: document.getElementById('btn-browser-quiz'),
+  browserWordList: document.getElementById('browser-word-list'),
+  browserSearchInput: document.getElementById('browser-search-input'),
+  btnBrowserSearchClear: document.getElementById('btn-browser-search-clear'),
+  browserFilterChips: document.getElementById('browser-filter-chips'),
+  chipCountAll: document.getElementById('chip-count-all'),
+  chipCountNew: document.getElementById('chip-count-new'),
+  chipCountLearning: document.getElementById('chip-count-learning'),
+  chipCountMastered: document.getElementById('chip-count-mastered'),
+  chipCountStarred: document.getElementById('chip-count-starred'),
+  browserSortSelect: document.getElementById('browser-sort-select'),
+  btnBrowserMask: document.getElementById('btn-browser-mask'),
 
   // Modals
   modalLoading: document.getElementById('modal-loading'),
@@ -1004,19 +1038,27 @@ function shuffleArray(arr) {
   return a;
 }
 
-async function startQuiz(deck) {
+async function startQuiz(deck, customCards = null) {
   stopCountdownTicker();
   state.activeDeck = deck;
   state.quiz.active = true;
   state.quiz.deck = deck;
 
-  showLoading('Đang tạo đề trắc nghiệm...', 'Chuẩn bị dữ liệu', 20);
-  state.allCards = await loadCardsForDeckFromDB(deck.id);
-  hideLoading();
+  if (customCards && customCards.length > 0) {
+    state.allCards = customCards;
+  } else {
+    showLoading('Đang tạo đề trắc nghiệm...', 'Chuẩn bị dữ liệu', 20);
+    state.allCards = await loadCardsForDeckFromDB(deck.id);
+    hideLoading();
+  }
 
   if (!state.allCards || state.allCards.length < 4) {
-    alert('Bộ thẻ này cần ít nhất 4 thẻ để tạo bài trắc nghiệm 4 đáp án!');
-    showDecksView();
+    alert('Cần ít nhất 4 thẻ để tạo bài trắc nghiệm 4 đáp án!');
+    if (state.browser.active) {
+      showBrowserView(deck);
+    } else {
+      showDecksView();
+    }
     return;
   }
 
@@ -1107,8 +1149,10 @@ async function startQuiz(deck) {
   state.quiz.initialTotal = questions.length;
 
   // Hiển thị màn hình Quiz
+  state.browser.active = false;
   DOM.viewDecks.classList.remove('active');
   DOM.viewStudy.classList.remove('active');
+  DOM.viewBrowser.classList.remove('active');
   DOM.viewQuiz.classList.add('active');
 
   DOM.btnBack.classList.remove('hidden');
@@ -1267,11 +1311,440 @@ function finishQuiz() {
   DOM.quizVictoryModal.classList.remove('hidden');
 }
 
+// ==========================================================================
+// Word List / Deck Browser (P1: Core Rendering & Data Normalization)
+// ==========================================================================
+const BROWSER_STATUS_META = {
+  new: { label: 'Mới', badgeClass: 'badge-new' },
+  learning: { label: 'Đang học', badgeClass: 'badge-learning' },
+  mastered: { label: 'Đã thuộc', badgeClass: 'badge-mastered' }
+};
+
+function getCardStatus(card) {
+  if (card.state === 'rev' || (card.ivl && card.ivl >= 21 && card.state !== 'new')) {
+    return 'mastered';
+  }
+  if (card.state === 'learn' || (card.reps > 0 && card.state !== 'new')) {
+    return 'learning';
+  }
+  return 'new';
+}
+
+function sanitizeTermHtml(html) {
+  if (!html) return '';
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+
+  const allowedTags = new Set(['RUBY', 'RT', 'RP', 'B', 'STRONG', 'I', 'EM', 'BR']);
+  const dropTags = new Set(['STYLE', 'SCRIPT', 'AUDIO', 'IMG']);
+
+  function serializeNode(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return escapeHtml(node.textContent || '');
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+    const tag = node.tagName.toUpperCase();
+    if (dropTags.has(tag)) return '';
+    if (tag === 'BR') return '<br>';
+
+    const inner = Array.from(node.childNodes).map(serializeNode).join('');
+    if (allowedTags.has(tag)) {
+      const lower = tag.toLowerCase();
+      return `<${lower}>${inner}</${lower}>`;
+    }
+    return inner;
+  }
+
+  return Array.from(wrapper.childNodes).map(serializeNode).join('').trim();
+}
+
+function normalizeCardData(card, index = 0) {
+  const status = getCardStatus(card);
+  const isStarred = Boolean(card.isStarred);
+  const quizWrongCount = card.quizWrongCount || 0;
+
+  let termHtml = '';
+  let term = '';
+  let phonetic = '';
+  let definition = '';
+  let example = '';
+
+  const fields = Array.isArray(card.fields) ? card.fields : null;
+
+  if (fields && fields.length >= 6) {
+    // Định dạng Minna no Nihongo (6+ fields: Kanji, Furigana, Reading, Romaji, Hán Việt, Nghĩa, [Ví dụ])
+    const expr = cleanText(fields[0]);
+    const furiRaw = fields[1] || fields[0] || '';
+    const reading = cleanText(fields[2]);
+    const romaji = cleanText(fields[3]);
+    const hanviet = cleanText(fields[4]);
+    const meaning = cleanText(fields[5] || fields[4] || '');
+    const extra = cleanText(fields[6] || '');
+
+    term = expr || cleanText(furiRaw);
+    termHtml = sanitizeTermHtml(furiRaw) || escapeHtml(term);
+
+    const phoneticParts = [];
+    if (reading && reading !== term) phoneticParts.push(reading);
+    if (romaji) phoneticParts.push(romaji);
+    if (hanviet) phoneticParts.push(`HV: ${hanviet}`);
+    phonetic = phoneticParts.join(' • ');
+
+    definition = meaning;
+    example = extra;
+  } else if (fields && fields.length >= 2) {
+    // Định dạng 2-5 fields tổng quát
+    const rawTerm = fields[0] || '';
+    term = cleanText(rawTerm);
+    termHtml = sanitizeTermHtml(rawTerm) || escapeHtml(term);
+
+    const field1Text = cleanText(fields[1]);
+    const field2Text = fields.length >= 3 ? cleanText(fields[2]) : '';
+    const looksLikePhonetic = /^[/\[（(].+[/\]）)]$/.test(field1Text);
+
+    if (looksLikePhonetic && field2Text) {
+      phonetic = field1Text;
+      definition = field2Text;
+      example = fields.length >= 4 ? cleanText(fields[3]) : '';
+    } else {
+      definition = field1Text;
+      example = field2Text;
+    }
+  } else {
+    // Fallback trích xuất từ HTML (thẻ mẫu hoặc thẻ không lưu raw fields)
+    const frontDiv = document.createElement('div');
+    frontDiv.innerHTML = card.front || '';
+    const frontHeading = frontDiv.querySelector('h1, h2, h3, h4, strong');
+    const frontParagraphs = Array.from(frontDiv.querySelectorAll('p, div'));
+
+    if (frontHeading && frontDiv.querySelectorAll('h1, h2, h3, h4').length > 0) {
+      termHtml = sanitizeTermHtml(frontHeading.innerHTML);
+      term = cleanText(frontHeading.innerHTML);
+      const subP = frontParagraphs.find(p => p !== frontHeading && cleanText(p.innerHTML));
+      if (subP) {
+        const subTxt = cleanText(subP.innerHTML);
+        if (/[/\[].+[/\]]/.test(subTxt) || subTxt.length <= 45) {
+          phonetic = subTxt;
+        }
+      }
+    } else {
+      term = cleanText(card.front);
+      termHtml = sanitizeTermHtml(card.front) || escapeHtml(term);
+    }
+
+    const backParts = (card.back || '').split(/<hr[^>]*>/i);
+    const backMain = document.createElement('div');
+    backMain.innerHTML = backParts[0] || '';
+    const backHeading = backMain.querySelector('h1, h2, h3, h4');
+
+    if (backHeading) {
+      const headTxt = cleanText(backHeading.innerHTML);
+      const restTxt = Array.from(backMain.children)
+        .filter(el => el !== backHeading)
+        .map(el => cleanText(el.innerHTML))
+        .filter(Boolean)
+        .join(' — ');
+      definition = restTxt ? `${headTxt}: ${restTxt}` : headTxt;
+    } else {
+      definition = cleanText(backParts[0] || card.back);
+    }
+
+    if (backParts.length > 1) {
+      example = cleanText(backParts.slice(1).join(' '));
+    }
+  }
+
+  if (!term) {
+    term = '(Thẻ trống)';
+    termHtml = escapeHtml(term);
+  }
+
+  const searchStr = `${term} ${phonetic} ${definition} ${example}`.toLowerCase();
+
+  return {
+    id: card.id,
+    rawCard: card,
+    originalIndex: index,
+    term,
+    termHtml,
+    phonetic,
+    definition,
+    example,
+    status,
+    isStarred,
+    quizWrongCount,
+    searchStr
+  };
+}
+
+function updateBrowserStatsAndChips() {
+  const items = state.browser.items || [];
+  const total = items.length;
+  if (DOM.browserCardCount) DOM.browserCardCount.textContent = `${total} từ`;
+
+  let newCount = 0;
+  let learningCount = 0;
+  let masteredCount = 0;
+  let starredCount = 0;
+
+  items.forEach(item => {
+    if (item.status === 'mastered') masteredCount++;
+    else if (item.status === 'learning') learningCount++;
+    else newCount++;
+
+    if (item.isStarred) starredCount++;
+  });
+
+  if (DOM.browserStatNew) DOM.browserStatNew.textContent = `Mới: ${newCount}`;
+  if (DOM.browserStatLearning) DOM.browserStatLearning.textContent = `Đang học: ${learningCount}`;
+  if (DOM.browserStatMastered) DOM.browserStatMastered.textContent = `Đã thuộc: ${masteredCount}`;
+
+  if (total > 0) {
+    if (DOM.browserBarMastered) DOM.browserBarMastered.style.width = `${(masteredCount / total) * 100}%`;
+    if (DOM.browserBarLearning) DOM.browserBarLearning.style.width = `${(learningCount / total) * 100}%`;
+    if (DOM.browserBarNew) DOM.browserBarNew.style.width = `${(newCount / total) * 100}%`;
+  } else {
+    if (DOM.browserBarMastered) DOM.browserBarMastered.style.width = '0%';
+    if (DOM.browserBarLearning) DOM.browserBarLearning.style.width = '0%';
+    if (DOM.browserBarNew) DOM.browserBarNew.style.width = '0%';
+  }
+
+  if (DOM.chipCountAll) DOM.chipCountAll.textContent = total;
+  if (DOM.chipCountNew) DOM.chipCountNew.textContent = newCount;
+  if (DOM.chipCountLearning) DOM.chipCountLearning.textContent = learningCount;
+  if (DOM.chipCountMastered) DOM.chipCountMastered.textContent = masteredCount;
+  if (DOM.chipCountStarred) DOM.chipCountStarred.textContent = starredCount;
+}
+
+function applyBrowserFilters() {
+  if (!state.browser.items) return;
+
+  const filter = state.browser.filter || 'all';
+  const query = (state.browser.searchQuery || '').trim().toLowerCase();
+  const sortBy = state.browser.sortBy || 'original';
+
+  // 1. Filter by status / starred
+  let list = state.browser.items.filter(item => {
+    if (filter === 'new' && item.status !== 'new') return false;
+    if (filter === 'learning' && item.status !== 'learning') return false;
+    if (filter === 'mastered' && item.status !== 'mastered') return false;
+    if (filter === 'starred' && !item.isStarred) return false;
+    return true;
+  });
+
+  // 2. Filter by search query (match term, phonetic, definition, example)
+  if (query) {
+    list = list.filter(item => item.searchStr.includes(query));
+  }
+
+  // 3. Sort
+  const sorted = [...list];
+  if (sortBy === 'az') {
+    sorted.sort((a, b) => a.term.localeCompare(b.term, 'ja'));
+  } else if (sortBy === 'za') {
+    sorted.sort((a, b) => b.term.localeCompare(a.term, 'ja'));
+  } else if (sortBy === 'status') {
+    // Priority: learning (1), new (2), mastered (3)
+    const priority = { learning: 1, new: 2, mastered: 3 };
+    sorted.sort((a, b) => (priority[a.status] || 9) - (priority[b.status] || 9));
+  } else {
+    // 'original'
+    sorted.sort((a, b) => a.originalIndex - b.originalIndex);
+  }
+
+  state.browser.filteredItems = sorted;
+
+  // 4. Update Quick Action buttons with filtered count
+  const count = sorted.length;
+  if (DOM.btnBrowserStudy) {
+    DOM.btnBrowserStudy.innerHTML = `<span>🗂️ Học Flashcard (${count})</span>`;
+    DOM.btnBrowserStudy.disabled = count === 0;
+    DOM.btnBrowserStudy.style.opacity = count === 0 ? '0.5' : '1';
+    DOM.btnBrowserStudy.style.pointerEvents = count === 0 ? 'none' : 'auto';
+  }
+  if (DOM.btnBrowserQuiz) {
+    DOM.btnBrowserQuiz.innerHTML = `<span>🎯 Làm Quiz (${count})</span>`;
+    DOM.btnBrowserQuiz.disabled = count < 4;
+    DOM.btnBrowserQuiz.style.opacity = count < 4 ? '0.5' : '1';
+    DOM.btnBrowserQuiz.style.pointerEvents = count < 4 ? 'none' : 'auto';
+  }
+
+  // 5. Render list
+  DOM.browserWordList.innerHTML = '';
+
+  if (state.browser.items.length === 0) {
+    DOM.browserWordList.innerHTML = `
+      <div class="browser-empty-state">
+        <div class="empty-icon">📭</div>
+        <p>File này chưa có từ vựng nào.</p>
+        <button id="btn-browser-empty-back" class="btn-action-subtle">← Quay lại bộ thẻ</button>
+      </div>
+    `;
+    const emptyBackBtn = document.getElementById('btn-browser-empty-back');
+    if (emptyBackBtn) emptyBackBtn.addEventListener('click', showDecksView);
+    return;
+  }
+
+  if (sorted.length === 0) {
+    DOM.browserWordList.innerHTML = `
+      <div class="browser-empty-state">
+        <div class="empty-icon">🔍</div>
+        <p>Không tìm thấy từ vựng nào phù hợp.</p>
+        <span>Thử tìm từ khóa khác hoặc bấm nút bên dưới để đặt lại bộ lọc.</span>
+        <button id="btn-browser-reset-filters" class="btn-browser-action btn-browser-primary" style="margin-top: 10px;">
+          <span>✕ Đặt lại tìm kiếm & bộ lọc</span>
+        </button>
+      </div>
+    `;
+    const resetBtn = document.getElementById('btn-browser-reset-filters');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        state.browser.searchQuery = '';
+        state.browser.filter = 'all';
+        if (DOM.browserSearchInput) DOM.browserSearchInput.value = '';
+        if (DOM.btnBrowserSearchClear) DOM.btnBrowserSearchClear.classList.add('hidden');
+        if (DOM.browserFilterChips) {
+          DOM.browserFilterChips.querySelectorAll('.filter-chip').forEach(c => {
+            c.classList.toggle('active', c.dataset.filter === 'all');
+          });
+        }
+        applyBrowserFilters();
+      });
+    }
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  sorted.forEach(item => {
+    fragment.appendChild(renderBrowserWordItem(item));
+  });
+  DOM.browserWordList.appendChild(fragment);
+}
+
+function renderBrowserWordItem(item) {
+  const meta = BROWSER_STATUS_META[item.status] || BROWSER_STATUS_META.new;
+  const rowEl = document.createElement('article');
+  rowEl.className = 'browser-word-item';
+  rowEl.dataset.cardId = item.id;
+
+  const defHtml = item.definition
+    ? `<div class="word-definition">${escapeHtml(item.definition)}</div>`
+    : `<div><span class="word-missing-def">Chưa có nghĩa</span></div>`;
+
+  const exampleHtml = item.example
+    ? `<div class="word-example">${escapeHtml(item.example)}</div>`
+    : '';
+
+  const phoneticHtml = item.phonetic
+    ? `<span class="word-phonetic">${escapeHtml(item.phonetic)}</span>`
+    : '';
+
+  rowEl.innerHTML = `
+    <div class="word-item-top">
+      <div class="word-term-group">
+        <button class="word-star-btn ${item.isStarred ? 'starred' : ''}" type="button" aria-label="${item.isStarred ? 'Bỏ đánh dấu sao' : 'Đánh dấu sao'}" title="${item.isStarred ? 'Bỏ đánh dấu sao' : 'Đánh dấu sao (từ khó)'}">
+          ${item.isStarred ? '★' : '☆'}
+        </button>
+        <span class="word-term">${item.termHtml}</span>
+        ${phoneticHtml}
+      </div>
+      <span class="word-status-badge ${meta.badgeClass}">${meta.label}</span>
+    </div>
+    ${defHtml}
+    ${exampleHtml}
+  `;
+
+  // Toggle star
+  const starBtn = rowEl.querySelector('.word-star-btn');
+  if (starBtn) {
+    starBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      item.isStarred = !item.isStarred;
+      if (item.rawCard) {
+        item.rawCard.isStarred = item.isStarred;
+        await updateCardInDB(item.rawCard);
+      }
+      starBtn.textContent = item.isStarred ? '★' : '☆';
+      starBtn.classList.toggle('starred', item.isStarred);
+      starBtn.setAttribute('aria-label', item.isStarred ? 'Bỏ đánh dấu sao' : 'Đánh dấu sao');
+      updateBrowserStatsAndChips();
+      if (state.browser.filter === 'starred' && !item.isStarred) {
+        applyBrowserFilters();
+      }
+    });
+  }
+
+  // Click row: In masking mode, toggle reveal. Otherwise, toggle text clamp expansion.
+  rowEl.addEventListener('click', () => {
+    if (state.browser.masking) {
+      rowEl.classList.toggle('revealed');
+    } else {
+      rowEl.classList.toggle('expanded');
+    }
+  });
+
+  return rowEl;
+}
+
+async function showBrowserView(deck) {
+  stopCountdownTicker();
+  state.activeDeck = deck;
+  state.quiz.active = false;
+  state.browser.active = true;
+  state.browser.deck = deck;
+  state.browser.filter = 'all';
+  state.browser.searchQuery = '';
+  state.browser.sortBy = 'original';
+  state.browser.masking = false;
+
+  DOM.viewDecks.classList.remove('active');
+  DOM.viewStudy.classList.remove('active');
+  DOM.viewQuiz.classList.remove('active');
+  DOM.viewBrowser.classList.add('active');
+
+  DOM.btnBack.classList.remove('hidden');
+  DOM.btnResetDeck.classList.add('hidden');
+  DOM.btnToggleQuiz.classList.add('hidden');
+  DOM.btnToggleFlashcard.classList.add('hidden');
+  DOM.appTitle.textContent = deck.name;
+
+  DOM.browserDeckName.textContent = deck.name;
+  DOM.browserWordList.innerHTML = '';
+  if (DOM.browserWordList) DOM.browserWordList.classList.remove('masking-mode');
+
+  // Reset inputs & filters UI
+  if (DOM.browserSearchInput) DOM.browserSearchInput.value = '';
+  if (DOM.btnBrowserSearchClear) DOM.btnBrowserSearchClear.classList.add('hidden');
+  if (DOM.browserSortSelect) DOM.browserSortSelect.value = 'original';
+  if (DOM.btnBrowserMask) {
+    DOM.btnBrowserMask.classList.remove('active');
+    DOM.btnBrowserMask.innerHTML = '<span class="mask-icon">👁️</span><span class="mask-label">Ẩn nghĩa</span>';
+  }
+  if (DOM.browserFilterChips) {
+    DOM.browserFilterChips.querySelectorAll('.filter-chip').forEach(c => {
+      c.classList.toggle('active', c.dataset.filter === 'all');
+    });
+  }
+
+  showLoading('Đang tải danh sách từ...', 'Vui lòng chờ...');
+  const cards = await loadCardsForDeckFromDB(deck.id);
+  hideLoading();
+
+  state.allCards = cards || [];
+  state.browser.items = state.allCards.map((c, idx) => normalizeCardData(c, idx));
+
+  updateBrowserStatsAndChips();
+  applyBrowserFilters();
+  DOM.viewBrowser.scrollTop = 0;
+}
+
 // Switch Views
 function showDecksView() {
   stopCountdownTicker();
   DOM.viewStudy.classList.remove('active');
   DOM.viewQuiz.classList.remove('active');
+  DOM.viewBrowser.classList.remove('active');
   DOM.viewDecks.classList.add('active');
   DOM.btnBack.classList.add('hidden');
   DOM.btnResetDeck.classList.add('hidden');
@@ -1280,15 +1753,18 @@ function showDecksView() {
   DOM.appTitle.textContent = 'Anki Web iOS';
   state.activeDeck = null;
   state.quiz.active = false;
+  state.browser.active = false;
   refreshDecksList();
 }
 
-async function showStudyView(deck, mode = 'due') {
+async function showStudyView(deck, mode = 'due', customCards = null) {
   stopCountdownTicker();
   state.activeDeck = deck;
   state.quiz.active = false;
+  state.browser.active = false;
   DOM.viewDecks.classList.remove('active');
   DOM.viewQuiz.classList.remove('active');
+  DOM.viewBrowser.classList.remove('active');
   DOM.viewStudy.classList.add('active');
   DOM.btnBack.classList.remove('hidden');
   DOM.btnResetDeck.classList.remove('hidden');
@@ -1297,18 +1773,25 @@ async function showStudyView(deck, mode = 'due') {
   DOM.appTitle.textContent = deck.name;
   DOM.studyDeckName.textContent = deck.name;
 
-  showLoading('Đang tải thẻ học...', 'Vui lòng chờ...');
-  state.allCards = await loadCardsForDeckFromDB(deck.id);
-  hideLoading();
+  if (customCards && customCards.length > 0) {
+    state.allCards = customCards;
+  } else {
+    showLoading('Đang tải thẻ học...', 'Vui lòng chờ...');
+    state.allCards = await loadCardsForDeckFromDB(deck.id);
+    hideLoading();
+  }
 
   if (!state.allCards || state.allCards.length === 0) {
-    alert('Bộ thẻ này không có dữ liệu thẻ!');
+    alert('Không có dữ liệu thẻ học!');
     showDecksView();
     return;
   }
 
   const now = Date.now();
-  if (mode === 'due') {
+  if (customCards && customCards.length > 0) {
+    // Khi học từ danh sách đã lọc, học toàn bộ các thẻ được chọn
+    state.cards = [...state.allCards];
+  } else if (mode === 'due') {
     // Chỉ lấy thẻ mới hoặc thẻ đã đến hạn ôn tập (realtime)
     state.cards = state.allCards.filter(c => c.state === 'new' || !c.due || c.due <= now);
   } else {
@@ -1590,30 +2073,40 @@ async function refreshDecksList() {
     const cardEl = document.createElement('div');
     cardEl.className = 'deck-item-card';
     cardEl.innerHTML = `
-      <div class="deck-item-info">
-        <span class="deck-item-name">${escapeHtml(deck.name)}</span>
-        <div class="deck-item-meta">
-          <span>📚 ${deck.cardCount || cards.length} thẻ</span>
-          ${dueCount > 0 ? `<span class="deck-meta-pill deck-meta-due">⚡ ${dueCount} cần học</span>` : ''}
-          ${waitingCount > 0 ? `<span class="deck-meta-pill deck-meta-wait">⏳ ${waitingCount} đang chờ</span>` : ''}
+      <div class="deck-item-header">
+        <div class="deck-item-info">
+          <span class="deck-item-name">${escapeHtml(deck.name)}</span>
+          <div class="deck-item-meta">
+            <span>📚 ${deck.cardCount || cards.length} thẻ</span>
+            ${dueCount > 0 ? `<span class="deck-meta-pill deck-meta-due">⚡ ${dueCount} cần học</span>` : ''}
+            ${waitingCount > 0 ? `<span class="deck-meta-pill deck-meta-wait">⏳ ${waitingCount} đang chờ</span>` : ''}
+          </div>
+        </div>
+        <div class="deck-item-tools">
+          <button class="btn-deck-reset" title="Đặt lại thời gian học (Reset)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+            </svg>
+          </button>
+          <button class="btn-deck-delete" title="Xóa bộ thẻ">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+          </button>
         </div>
       </div>
       <div class="deck-item-actions">
+        <button class="btn-deck-browser" title="Xem danh sách từ vựng">📋 Danh sách (${cards.length})</button>
         <button class="btn-deck-quiz" title="Luyện trắc nghiệm Duolingo">🎯 Trắc nghiệm</button>
         <button class="btn-deck-study">${dueCount > 0 ? `Học thẻ (${dueCount})` : 'Học thẻ'}</button>
-        <button class="btn-deck-reset" title="Đặt lại thời gian học (Reset)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
-          </svg>
-        </button>
-        <button class="btn-deck-delete" title="Xóa bộ thẻ">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="3 6 5 6 21 6"></polyline>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-          </svg>
-        </button>
       </div>
     `;
+
+    cardEl.querySelector('.btn-deck-browser').addEventListener('click', (e) => {
+      e.stopPropagation();
+      showBrowserView(deck);
+    });
 
     cardEl.querySelector('.btn-deck-quiz').addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1703,6 +2196,93 @@ function setupEventListeners() {
   DOM.btnToggleFlashcard.addEventListener('click', () => {
     if (state.activeDeck) showStudyView(state.activeDeck);
   });
+
+  // Word List / Browser Quick Actions
+  if (DOM.btnBrowserStudy) {
+    DOM.btnBrowserStudy.addEventListener('click', () => {
+      if (!state.activeDeck) return;
+      const targetCards = (state.browser.filteredItems && state.browser.filteredItems.length > 0)
+        ? state.browser.filteredItems.map(it => it.rawCard)
+        : state.allCards;
+      if (!targetCards || targetCards.length === 0) {
+        alert('Không có từ vựng nào trong danh sách đang lọc để học!');
+        return;
+      }
+      showStudyView(state.activeDeck, 'all', targetCards);
+    });
+  }
+
+  if (DOM.btnBrowserQuiz) {
+    DOM.btnBrowserQuiz.addEventListener('click', () => {
+      if (!state.activeDeck) return;
+      const targetCards = (state.browser.filteredItems && state.browser.filteredItems.length > 0)
+        ? state.browser.filteredItems.map(it => it.rawCard)
+        : state.allCards;
+      if (!targetCards || targetCards.length < 4) {
+        alert('Cần ít nhất 4 thẻ trong danh sách đang lọc để làm trắc nghiệm 4 đáp án!');
+        return;
+      }
+      startQuiz(state.activeDeck, targetCards);
+    });
+  }
+
+  // Word List Search, Filter & Sort Listeners
+  if (DOM.browserSearchInput) {
+    DOM.browserSearchInput.addEventListener('input', (e) => {
+      const val = (e.target.value || '').trim().toLowerCase();
+      state.browser.searchQuery = val;
+      if (DOM.btnBrowserSearchClear) {
+        DOM.btnBrowserSearchClear.classList.toggle('hidden', !val);
+      }
+      applyBrowserFilters();
+    });
+  }
+
+  if (DOM.btnBrowserSearchClear) {
+    DOM.btnBrowserSearchClear.addEventListener('click', () => {
+      if (DOM.browserSearchInput) {
+        DOM.browserSearchInput.value = '';
+        DOM.browserSearchInput.focus();
+      }
+      state.browser.searchQuery = '';
+      DOM.btnBrowserSearchClear.classList.add('hidden');
+      applyBrowserFilters();
+    });
+  }
+
+  if (DOM.browserFilterChips) {
+    DOM.browserFilterChips.addEventListener('click', (e) => {
+      const chip = e.target.closest('.filter-chip');
+      if (!chip) return;
+      DOM.browserFilterChips.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      state.browser.filter = chip.dataset.filter || 'all';
+      applyBrowserFilters();
+    });
+  }
+
+  if (DOM.browserSortSelect) {
+    DOM.browserSortSelect.addEventListener('change', (e) => {
+      state.browser.sortBy = e.target.value || 'original';
+      applyBrowserFilters();
+    });
+  }
+
+  if (DOM.btnBrowserMask) {
+    DOM.btnBrowserMask.addEventListener('click', () => {
+      state.browser.masking = !state.browser.masking;
+      DOM.btnBrowserMask.classList.toggle('active', state.browser.masking);
+      DOM.btnBrowserMask.innerHTML = state.browser.masking
+        ? '<span class="mask-icon">🙈</span><span class="mask-label">Đang ẩn</span>'
+        : '<span class="mask-icon">👁️</span><span class="mask-label">Ẩn nghĩa</span>';
+      DOM.browserWordList.classList.toggle('masking-mode', state.browser.masking);
+
+      // Reset revealed items
+      DOM.browserWordList.querySelectorAll('.browser-word-item').forEach(el => {
+        el.classList.remove('revealed');
+      });
+    });
+  }
 
   DOM.btnQuizClose.addEventListener('click', () => {
     showDecksView();
@@ -1821,8 +2401,15 @@ function setupEventListeners() {
     renderCurrentCard();
   });
 
-  // Keyboard Shortcuts (Quiz & Study)
+  // Keyboard Shortcuts (Quiz, Browser & Study)
   window.addEventListener('keydown', (e) => {
+    if (DOM.viewBrowser && DOM.viewBrowser.classList.contains('active')) {
+      if (e.key === 'Escape') {
+        showDecksView();
+      }
+      return;
+    }
+
     if (DOM.viewQuiz && DOM.viewQuiz.classList.contains('active')) {
       if (!DOM.quizFeedbackBar.classList.contains('hidden')) {
         if (e.code === 'Space' || e.code === 'Enter') {

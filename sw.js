@@ -1,4 +1,4 @@
-const CACHE_NAME = 'anki-web-ios-v15';
+const CACHE_NAME = 'anki-web-ios-v18';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
