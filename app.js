@@ -154,6 +154,16 @@ function updateCardInDB(card) {
   });
 }
 
+function updateDeckInDB(deck) {
+  return new Promise((resolve, reject) => {
+    const tx = state.db.transaction('decks', 'readwrite');
+    const store = tx.objectStore('decks');
+    store.put(deck);
+    tx.oncomplete = () => resolve();
+    tx.onerror = (e) => reject(e.target.error);
+  });
+}
+
 function resetDeckProgressInDB(deckId) {
   return new Promise(async (resolve, reject) => {
     try {
@@ -2047,9 +2057,37 @@ async function confirmAndResetDeck(deckId, deckName = '') {
   }
 }
 
+/**
+ * Extract numeric lesson order from deck name for Natural Sort (Bài 2 < Bài 3 < Bài 10).
+ */
+function extractLessonOrder(deckName) {
+  if (!deckName) return Number.MAX_SAFE_INTEGER;
+  const keywordMatch = deckName.match(/(?:^|[\s_\(\[\.\-])(?:bài|bai|lesson|unit|chuong|chương|tập|tap|l)\s*(\d+)/i)
+    || deckName.match(/第\s*(\d+)/);
+  if (keywordMatch) return parseInt(keywordMatch[1], 10);
+  const numMatch = deckName.match(/(\d+)/);
+  return numMatch ? parseInt(numMatch[1], 10) : Number.MAX_SAFE_INTEGER;
+}
+
+/**
+ * Sort decks with pinned lessons first, then naturally by lesson number with locale tie-breaking.
+ */
+function sortDecksNaturally(decks) {
+  return [...decks].sort((a, b) => {
+    const pinA = a.isPinned ? 1 : 0;
+    const pinB = b.isPinned ? 1 : 0;
+    if (pinA !== pinB) return pinB - pinA;
+
+    const orderA = extractLessonOrder(a.name);
+    const orderB = extractLessonOrder(b.name);
+    if (orderA !== orderB) return orderA - orderB;
+    return (a.name || '').localeCompare(b.name || '', 'vi', { numeric: true, sensitivity: 'base' });
+  });
+}
+
 // Refresh deck list on home screen (Hiển thị thẻ Cần học vs Đang chờ)
 async function refreshDecksList() {
-  state.decks = await loadAllDecksFromDB();
+  state.decks = sortDecksNaturally(await loadAllDecksFromDB());
   DOM.deckCountBadge.textContent = `${state.decks.length} bộ thẻ`;
   DOM.decksContainer.innerHTML = '';
 
@@ -2071,18 +2109,28 @@ async function refreshDecksList() {
     const waitingCount = cards.length - dueCount;
 
     const cardEl = document.createElement('div');
-    cardEl.className = 'deck-item-card';
+    cardEl.className = `deck-item-card ${deck.isPinned ? 'deck-pinned' : ''}`;
     cardEl.innerHTML = `
       <div class="deck-item-header">
         <div class="deck-item-info">
-          <span class="deck-item-name">${escapeHtml(deck.name)}</span>
+          <div class="deck-title-row">
+            ${deck.isPinned ? '<span class="pinned-indicator" aria-hidden="true">📌</span>' : ''}
+            <span class="deck-item-name">${escapeHtml(deck.name)}</span>
+          </div>
           <div class="deck-item-meta">
             <span>📚 ${deck.cardCount || cards.length} thẻ</span>
             ${dueCount > 0 ? `<span class="deck-meta-pill deck-meta-due">⚡ ${dueCount} cần học</span>` : ''}
             ${waitingCount > 0 ? `<span class="deck-meta-pill deck-meta-wait">⏳ ${waitingCount} đang chờ</span>` : ''}
+            ${deck.isPinned ? `<span class="deck-meta-pill deck-meta-pinned">📌 Đã ghim</span>` : ''}
           </div>
         </div>
         <div class="deck-item-tools">
+          <button class="btn-deck-pin ${deck.isPinned ? 'pinned' : ''}" title="${deck.isPinned ? 'Bỏ ghim bộ thẻ' : 'Ghim bộ thẻ muốn học lên đầu'}" aria-label="${deck.isPinned ? 'Bỏ ghim bộ thẻ' : 'Ghim bộ thẻ muốn học lên đầu'}" aria-pressed="${deck.isPinned ? 'true' : 'false'}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="${deck.isPinned ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 17v5"></path>
+              <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path>
+            </svg>
+          </button>
           <button class="btn-deck-reset" title="Đặt lại thời gian học (Reset)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
@@ -2102,6 +2150,13 @@ async function refreshDecksList() {
         <button class="btn-deck-study">${dueCount > 0 ? `Học thẻ (${dueCount})` : 'Học thẻ'}</button>
       </div>
     `;
+
+    cardEl.querySelector('.btn-deck-pin').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      deck.isPinned = !deck.isPinned;
+      await updateDeckInDB(deck);
+      await refreshDecksList();
+    });
 
     cardEl.querySelector('.btn-deck-browser').addEventListener('click', (e) => {
       e.stopPropagation();
