@@ -41,7 +41,8 @@ const state = {
     sortBy: 'original',
     masking: false,
     filteredItems: []
-  }
+  },
+  deckSortBy: (typeof localStorage !== 'undefined' && localStorage.getItem('anki_deck_sort')) || 'lesson'
 };
 
 // ==========================================================================
@@ -765,6 +766,7 @@ const DOM = {
   btnLoadDemo: document.getElementById('btn-load-demo'),
   decksContainer: document.getElementById('decks-container'),
   deckCountBadge: document.getElementById('deck-count-badge'),
+  deckSortSelect: document.getElementById('deck-sort-select'),
 
   // Study Screen elements
   studyDeckName: document.getElementById('study-deck-name'),
@@ -1159,6 +1161,7 @@ async function startQuiz(deck, customCards = null) {
   state.quiz.initialTotal = questions.length;
 
   // Hiển thị màn hình Quiz
+  markDeckStudied(deck);
   state.browser.active = false;
   DOM.viewDecks.classList.remove('active');
   DOM.viewStudy.classList.remove('active');
@@ -1699,6 +1702,7 @@ function renderBrowserWordItem(item) {
 
 async function showBrowserView(deck) {
   stopCountdownTicker();
+  markDeckStudied(deck);
   state.activeDeck = deck;
   state.quiz.active = false;
   state.browser.active = true;
@@ -1769,6 +1773,7 @@ function showDecksView() {
 
 async function showStudyView(deck, mode = 'due', customCards = null) {
   stopCountdownTicker();
+  markDeckStudied(deck);
   state.activeDeck = deck;
   state.quiz.active = false;
   state.browser.active = false;
@@ -2070,24 +2075,62 @@ function extractLessonOrder(deckName) {
 }
 
 /**
- * Sort decks with pinned lessons first, then naturally by lesson number with locale tie-breaking.
+ * Record last study/interaction timestamp on a deck for "Học gần đây" sorting.
  */
-function sortDecksNaturally(decks) {
+function markDeckStudied(deck) {
+  if (!deck) return;
+  deck.lastStudied = Date.now();
+  if (state.db) {
+    updateDeckInDB(deck).catch(() => {});
+  }
+}
+
+/**
+ * Sort decks with pinned lessons first, then by selected order ('lesson', 'lesson-desc', 'recent', 'az').
+ */
+function sortDecksNaturally(decks, sortBy = 'lesson') {
+  const compareNames = (a, b) =>
+    (a.name || '').localeCompare(b.name || '', 'vi', { numeric: true, sensitivity: 'base' });
+
   return [...decks].sort((a, b) => {
     const pinA = a.isPinned ? 1 : 0;
     const pinB = b.isPinned ? 1 : 0;
     if (pinA !== pinB) return pinB - pinA;
 
+    if (sortBy === 'recent') {
+      const timeA = a.lastStudied || (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+      const timeB = b.lastStudied || (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+      if (timeA !== timeB) return timeB - timeA;
+      return compareNames(a, b);
+    }
+
+    if (sortBy === 'az') {
+      return compareNames(a, b);
+    }
+
     const orderA = extractLessonOrder(a.name);
     const orderB = extractLessonOrder(b.name);
+    if (sortBy === 'lesson-desc') {
+      const hasNumA = orderA < Number.MAX_SAFE_INTEGER;
+      const hasNumB = orderB < Number.MAX_SAFE_INTEGER;
+      if (hasNumA !== hasNumB) return hasNumA ? -1 : 1;
+      if (orderA !== orderB) return orderB - orderA;
+      return compareNames(b, a);
+    }
+
     if (orderA !== orderB) return orderA - orderB;
-    return (a.name || '').localeCompare(b.name || '', 'vi', { numeric: true, sensitivity: 'base' });
+    return compareNames(a, b);
   });
 }
 
 // Refresh deck list on home screen (Hiển thị thẻ Cần học vs Đang chờ)
 async function refreshDecksList() {
-  state.decks = sortDecksNaturally(await loadAllDecksFromDB());
+  const validSorts = ['lesson', 'lesson-desc', 'recent', 'az'];
+  const sortBy = validSorts.includes(state.deckSortBy) ? state.deckSortBy : 'lesson';
+  state.deckSortBy = sortBy;
+  if (DOM.deckSortSelect) DOM.deckSortSelect.value = sortBy;
+
+  state.decks = sortDecksNaturally(await loadAllDecksFromDB(), sortBy);
   DOM.deckCountBadge.textContent = `${state.decks.length} bộ thẻ`;
   DOM.decksContainer.innerHTML = '';
 
@@ -2220,6 +2263,15 @@ function hideLoading() {
 function setupEventListeners() {
   // Navigation
   DOM.btnBack.addEventListener('click', showDecksView);
+
+  if (DOM.deckSortSelect) {
+    DOM.deckSortSelect.addEventListener('change', (e) => {
+      const val = e.target.value || 'lesson';
+      state.deckSortBy = val;
+      try { localStorage.setItem('anki_deck_sort', val); } catch {}
+      refreshDecksList();
+    });
+  }
 
   // Reset thời gian bộ thẻ khi đang học
   DOM.btnResetDeck.addEventListener('click', () => {

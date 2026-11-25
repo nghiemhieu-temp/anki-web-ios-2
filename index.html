@@ -96,8 +96,18 @@
       <!-- Decks List Section -->
       <section class="decks-section">
         <div class="section-header">
-          <h3>Bộ thẻ đã lưu</h3>
-          <span id="deck-count-badge" class="badge">0 bộ thẻ</span>
+          <div class="section-header-left">
+            <h3>Bộ thẻ đã lưu</h3>
+            <span id="deck-count-badge" class="badge">0 bộ thẻ</span>
+          </div>
+          <div class="deck-sort-wrap">
+            <select id="deck-sort-select" class="deck-sort-select" aria-label="Sắp xếp thứ tự bài">
+              <option value="lesson">Bài 1 ➔ N</option>
+              <option value="lesson-desc">Bài N ➔ 1</option>
+              <option value="recent">Học gần đây</option>
+              <option value="az">Tên A–Z</option>
+            </select>
+          </div>
         </div>
         <div id="decks-container" class="decks-list">
           <!-- Decks injected dynamically by app.js -->

@@ -293,6 +293,43 @@ body {
   justify-content: space-between;
   margin-bottom: 12px;
   padding: 0 4px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.section-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.deck-sort-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.deck-sort-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: rgba(255, 255, 255, 0.08) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E") no-repeat right 8px center;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 5px 26px 5px 10px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.deck-sort-select:focus {
+  border-color: var(--accent-blue);
+}
+
+.deck-sort-select option {
+  background: #1e293b;
+  color: #fff;
 }
 
 .section-header h3 {
